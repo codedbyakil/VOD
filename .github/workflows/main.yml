@@ -1,0 +1,129 @@
+name: Fetch Tamil VOD (Every 10 mins)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # Every 10 minutes
+  workflow_dispatch:         # Manual run
+
+jobs:
+  update-vod:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq and curl (if needed)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl
+
+      - name: Build vod.m3u
+        env:
+          XTREAM_USER: "Suryaaa"
+          XTREAM_PASS: "SURYAAAA"
+          XTREAM_HOST: "http://starshare.net:80"
+        run: |
+          set -euo pipefail  # Exit on error, undefined vars, pipe failures
+
+          HOST="$XTREAM_HOST"
+          USER="$XTREAM_USER"
+          PASS="$XTREAM_PASS"
+          OUTPUT="vod.m3u"
+
+          {
+            echo "#EXTM3U"
+            echo "# Auto-updated: $(date -u)"
+            echo "# Source: $HOST"
+            echo ""
+          } > "$OUTPUT"
+
+          # Fetch categories
+          CATEGORIES=$(curl -s "${HOST}/player_api.php?username=${USER}&password=${PASS}&action=get_vod_categories")
+          if ! echo "$CATEGORIES" | jq empty >/dev/null 2>&1; then
+            echo "❌ Categories API returned invalid JSON or failed"
+            echo "Response: $CATEGORIES"
+            exit 1
+          fi
+          # Get Tamil categories (case-insensitive match)
+          TAMIL_CATS=$(echo "$CATEGORIES" | jq -c '
+            [.[] |
+              select(.category_name | ascii_downcase | contains("tamil")) |
+              {id: (.category_id | tostring), name: .category_name}
+            ]
+          ')
+
+          TOTAL=0
+
+          # Handle empty Tamil category list
+          if [ "$(echo "$TAMIL_CATS" | jq 'length')" -eq 0 ]; then
+            echo "⚠️ No Tamil categories found."
+          else
+            for row in $(echo "$TAMIL_CATS" | jq -r '.[] | @base64'); do
+              _jq() {
+                echo "$row" | base64 -d | jq -r "$1"
+              }
+              cid=$(_jq '.id')
+              cname=$(_jq '.name')
+              echo "🎬 $cname (ID: $cid)"
+
+              VODS=$(curl -s "${HOST}/player_api.php?username=${USER}&password=${PASS}&action=get_vod_streams&category_id=${cid}")
+              # Validate VOD response
+              if ! echo "$VODS" | jq empty >/dev/null 2>&1; then
+                echo "⚠️ VOD streams API failed for category $cid. Skipping."
+                echo "Response: $VODS"
+                continue
+              fi
+
+              COUNT=$(echo "$VODS" | jq 'length // 0')
+              echo "  → $COUNT movies"
+
+              if [ "$COUNT" -gt 0 ]; then
+                echo "$VODS" | jq -r --arg group "$cname" --arg host "$HOST" --arg user "$USER" --arg pass "$PASS" '
+                  .[] |
+                  select(.stream_id) |
+                  (.name // "Unknown") as $name |
+                  (.stream_icon // "") as $logo |
+                  (.container_extension // "mp4") as $ext |
+                  (.stream_id | tostring) as $id |
+                  "#EXTINF:-1 tvg-logo=\"" + ($logo | @json | .[1:-1]) +
+                  "\" group-title=\"" + ($group | @json | .[1:-1]) +
+                  "\", " + ($name | @json | .[1:-1]) +
+                  "\n" + $host + "/movie/" + $user + "/" + $pass + "/" + $id + "." + $ext
+                ' >> "$OUTPUT"
+                TOTAL=$((TOTAL + COUNT))
+              fi
+            done
+          fi
+          echo "✅ Total entries: $TOTAL"
+
+          # Cleanup: Remove empty lines and malformed entries
+          # Keep only lines starting with #EXTINF followed by a URL line
+          awk '
+            /^#EXTINF/ { extinf = $0; next }
+            /^http/ && extinf != "" { print extinf; print $0; extinf = ""; next }
+            { extinf = "" }
+          ' "$OUTPUT" > "${OUTPUT}.tmp" && mv "${OUTPUT}.tmp" "$OUTPUT"
+
+          FINAL=$(grep -c '^http' "$OUTPUT" 2>/dev/null || echo 0)
+          echo "📤 Final streams in vod.m3u: $FINAL"
+
+          if [ "$FINAL" -eq 0 ]; then
+            echo "🛑 vod.m3u is empty — check logs above."
+            head -n 15 "$OUTPUT" || echo "(file empty)"
+            exit 1
+          fi
+
+      - name: Commit vod.m3u
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git add vod.m3u && ! git diff --staged --quiet; then
+            git commit -m "🤖 $FINAL Tamil VODs ($(date -u))"
+            git push
+          else
+            echo "⏭️ No changes to vod.m3u"
+          fi
