@@ -22,9 +22,9 @@ jobs:
 
       - name: Build vod.m3u
         env:
-          XTREAM_USER: "P4B9TB9xR8"
-          XTREAM_PASS: "humongous2tonight"
-          XTREAM_HOST: "http://starshare.st"
+          XTREAM_USER: "71626281"
+          XTREAM_PASS: "162627271"
+          XTREAM_HOST: "http://filex.me:80/"
         run: |
           set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
